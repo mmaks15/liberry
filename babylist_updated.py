@@ -114,15 +114,112 @@ class BabylistStrollerScraper:
         return product_links
     
     def simplify_color(self, color_name):
-        """Map color name to simplified category"""
+        """Map color to simplified category while preserving original name"""
         if not color_name or color_name == "N/A":
             return "Other"
-            
+        
         color_lower = color_name.lower()
-        for key, simplified in self.color_mapping.items():
-            if key in color_lower:
-                return simplified
+        
+        # Enhanced color mapping for complex names
+        color_mappings = {
+            'black': ['black', 'midnight', 'onyx', 'charcoal', 'slate'],
+            'white': ['white', 'ivory', 'cream', 'pearl', 'snow'],
+            'gray': ['gray', 'grey', 'silver', 'stone', 'ash', 'smoke'],
+            'blue': ['blue', 'navy', 'teal', 'aqua', 'ocean', 'sky', 'denim'],
+            'red': ['red', 'burgundy', 'wine', 'crimson', 'cherry', 'rust'],
+            'green': ['green', 'olive', 'forest', 'sage', 'mint', 'emerald'],
+            'brown': ['brown', 'tan', 'beige', 'khaki', 'taupe', 'almond', 'bronze', 'copper'],
+            'pink': ['pink', 'rose', 'blush', 'coral', 'salmon', 'peach'],
+            'purple': ['purple', 'lavender', 'plum', 'violet', 'lilac'],
+            'yellow': ['yellow', 'gold', 'butter', 'lemon', 'honey']
+        }
+        
+        # Check each category
+        for category, variations in color_mappings.items():
+            if any(variation in color_lower for variation in variations):
+                return category.title()
+        
         return "Other"
+
+    def _is_babylist_color(self, text):
+        """Enhanced color detection for Babylist's complex color names"""
+        if not text or len(text) > 100:  # Increased length for complex names
+            return False
+        
+        text_lower = text.lower().strip()
+        
+        # Skip obvious non-colors
+        skip_phrases = [
+            'select', 'choose', 'available', 'add to cart', 'buy now', 'quantity',
+            'shipping', 'return', 'description', 'reviews', 'specifications',
+            'compare', 'wishlist', 'registry', 'gift', 'share'
+        ]
+        
+        if any(skip in text_lower for skip in skip_phrases):
+            return False
+        
+        # Babylist-specific color indicators
+        color_indicators = [
+            # Frame/seat combinations
+            'frame', 'seat', 'canopy', 'fabric', 'chassis',
+            # Color words
+            'beige', 'taupe', 'almond', 'seashell', 'charcoal', 'slate',
+            'navy', 'sage', 'olive', 'burgundy', 'plum', 'coral',
+            'cream', 'ivory', 'pearl', 'silver', 'bronze', 'copper',
+            'midnight', 'forest', 'ocean', 'sky', 'rose', 'blush',
+            # Basic colors
+            'black', 'white', 'gray', 'grey', 'blue', 'red', 'green',
+            'brown', 'pink', 'purple', 'yellow', 'gold'
+        ]
+        
+        # Check if text contains color indicators
+        if any(indicator in text_lower for indicator in color_indicators):
+            return True
+        
+        # Check for "color/color" pattern (like "Beige/Taupe")
+        if '/' in text and len(text.split('/')) == 2:
+            parts = text.split('/')
+            if all(len(part.strip()) > 2 for part in parts):
+                return True
+        
+        # If it's a reasonable length and doesn't contain obvious non-color words
+        if 3 <= len(text) <= 50 and not any(char.isdigit() for char in text):
+            # Check if it looks like a color name (mostly letters and spaces)
+            if re.match(r'^[A-Za-z\s/\-&]+$', text):
+                return True
+        
+        return False
+    
+    def _extract_colors_from_json(self, obj):
+        """Extract colors from JSON-LD structured data"""
+        colors = set()
+        
+        if isinstance(obj, dict):
+            # Look for color-related keys
+            color_keys = ['color', 'colors', 'variant', 'variants', 'model', 'name', 'description']
+            
+            for key in color_keys:
+                if key in obj:
+                    val = obj[key]
+                    if isinstance(val, str) and self._is_babylist_color(val):
+                        colors.add(val)
+                    elif isinstance(val, list):
+                        for item in val:
+                            if isinstance(item, str) and self._is_babylist_color(item):
+                                colors.add(item)
+                            elif isinstance(item, dict):
+                                colors.update(self._extract_colors_from_json(item))
+            
+            # Recursively search all values
+            for value in obj.values():
+                if isinstance(value, (dict, list)):
+                    colors.update(self._extract_colors_from_json(value))
+        
+        elif isinstance(obj, list):
+            for item in obj:
+                colors.update(self._extract_colors_from_json(item))
+        
+        return colors
     
     def extract_product_details(self, url):
         """Extract detailed info from individual product page"""
@@ -182,12 +279,142 @@ class BabylistStrollerScraper:
             if product_data["brand"] == "N/A" and product_data["name"] != "N/A":
                 # Common stroller brands
                 brands = ['UPPAbaby', 'Bugaboo', 'Baby Jogger', 'BOB', 'Chicco', 'Graco', 
-                         'Britax', 'Nuna', 'Maxi-Cosi', 'Cybex', 'Stokke', 'Doona']
+                        'Britax', 'Nuna', 'Maxi-Cosi', 'Cybex', 'Stokke', 'Doona']
                 for brand in brands:
                     if brand.lower() in product_data["name"].lower():
                         product_data["brand"] = brand
                         break
             
+            # Color extraction - Extract colors first
+            colors_found = set()
+            
+            # Priority 1: Color variant selectors (most reliable)
+            color_selectors = [
+                '[data-testid*="color-option"]',
+                '[data-testid*="variant-option"]', 
+                '[data-testid*="color-swatch"]',
+                '.color-option',
+                '.color-swatch',
+                '.variant-option',
+                '[class*="ColorOption"]',
+                '[class*="VariantOption"]',
+                '[class*="color-picker"]'
+            ]
+            
+            for selector in color_selectors:
+                elements = soup.select(selector)
+                for elem in elements:
+                    # Check multiple attributes for color names
+                    for attr in ['data-color', 'data-variant', 'title', 'alt', 'aria-label', 'data-value']:
+                        color_val = elem.get(attr, '').strip()
+                        if color_val and self._is_babylist_color(color_val):
+                            colors_found.add(color_val)
+                    
+                    # Check text content
+                    text = elem.get_text().strip()
+                    if text and self._is_babylist_color(text):
+                        colors_found.add(text)
+            
+            # Priority 2: Dropdown/select options
+            selects = soup.select('select, [role="listbox"]')
+            for select in selects:
+                # Check if this is a color/variant selector
+                context = (select.get('name', '') + ' ' + select.get('aria-label', '') + ' ' + select.get('id', '')).lower()
+                if any(word in context for word in ['color', 'variant', 'style', 'option']):
+                    options = select.select('option, [role="option"]')
+                    for option in options:
+                        option_text = option.get_text().strip()
+                        option_value = option.get('value', '').strip()
+                        
+                        if option_text and self._is_babylist_color(option_text):
+                            colors_found.add(option_text)
+                        if option_value and self._is_babylist_color(option_value):
+                            colors_found.add(option_value)
+            
+            # Priority 3: Radio buttons and checkboxes with labels
+            inputs = soup.select('input[type="radio"], input[type="checkbox"]')
+            for inp in inputs:
+                # Check input attributes
+                for attr in ['data-color', 'value', 'title', 'aria-label']:
+                    val = inp.get(attr, '').strip()
+                    if val and self._is_babylist_color(val):
+                        colors_found.add(val)
+                
+                # Check associated labels
+                label_for = inp.get('id')
+                if label_for:
+                    label = soup.select_one(f'label[for="{label_for}"]')
+                    if label:
+                        label_text = label.get_text().strip()
+                        if self._is_babylist_color(label_text):
+                            colors_found.add(label_text)
+            
+            # Priority 4: Extract from product title/name (handles "- Color Name" format)
+            product_name = product_data["name"]
+            if product_name and product_name != "N/A":
+                # Look for " - [color]" pattern at end of product name
+                dash_match = re.search(r'\s+-\s+([^-]+)$', product_name)
+                if dash_match:
+                    potential_color = dash_match.group(1).strip()
+                    if self._is_babylist_color(potential_color):
+                        colors_found.add(potential_color)
+                
+                # Look for "in [color]" patterns
+                in_matches = re.findall(r'\bin\s+([^,\(\)]+?)(?:\s*[\(\),]|$)', product_name, re.IGNORECASE)
+                for match in in_matches:
+                    color = match.strip()
+                    if self._is_babylist_color(color):
+                        colors_found.add(color)
+            
+            # Priority 5: Image alt text (often contains color info)
+            images = soup.select('img[alt*="/"], img[alt*="Frame"], img[alt*="Seat"]')
+            for img in images:
+                alt_text = img.get('alt', '').strip()
+                if alt_text:
+                    # Extract color patterns from alt text
+                    color_patterns = [
+                        r'([A-Za-z\s]+(?:Frame|Seat|Canopy))',
+                        r'in\s+([A-Za-z\s/]+)',
+                        r'-\s*([A-Za-z\s/]+?)(?:\s|$)'
+                    ]
+                    
+                    for pattern in color_patterns:
+                        matches = re.findall(pattern, alt_text, re.IGNORECASE)
+                        for match in matches:
+                            if self._is_babylist_color(match.strip()):
+                                colors_found.add(match.strip())
+            
+            # Priority 6: JSON-LD structured data
+            try:
+                scripts = soup.select('script[type="application/ld+json"]')
+                for script in scripts:
+                    if script.string:
+                        data = json.loads(script.string)
+                        json_colors = self._extract_colors_from_json(data)
+                        colors_found.update(json_colors)
+            except:
+                pass
+            
+            # Clean and validate colors
+            cleaned_colors = []
+            for color in colors_found:
+                if color and len(color.strip()) >= 3:
+                    cleaned_color = color.strip()
+                    # Remove duplicates (case-insensitive)
+                    if not any(cleaned_color.lower() == existing.lower() for existing in cleaned_colors):
+                        cleaned_colors.append(cleaned_color)
+            
+            # Set color data in product_data
+            product_data["color_options"] = cleaned_colors if cleaned_colors else ["N/A"]
+            
+            # Create simplified colors using the existing method
+            if cleaned_colors and cleaned_colors != ["N/A"]:
+                simplified = [self.simplify_color(color) for color in cleaned_colors]
+                product_data["simplified_colors"] = list(set(simplified))  # Remove duplicates
+            else:
+                product_data["simplified_colors"] = ["N/A"]
+            
+            # Continue with other extractions...
             # Description - try multiple sources
             desc_sources = [
                 'meta[name="description"]',
@@ -252,45 +479,22 @@ class BabylistStrollerScraper:
                     product_data["image_url"] = img['src']
                     break
             
-            # Color options - look for color variants/swatches
-            color_selectors = [
-                '[data-testid*="color"]',
-                '[class*="color"]',
-                '[class*="swatch"]',
-                '[data-testid*="variant"]'
+            # Extract price
+            price_selectors = [
+                '[data-testid*="price"]',
+                '.price',
+                '[class*="price"]',
+                '.product-price'
             ]
             
-            colors_found = set()
-            for selector in color_selectors:
-                color_elems = soup.select(selector)
-                for elem in color_elems:
-                    # Try different attributes
-                    for attr in ['data-color', 'title', 'alt', 'aria-label']:
-                        color_val = elem.get(attr)
-                        if color_val:
-                            colors_found.add(color_val.strip())
-                    
-                    # Try text content
-                    text = elem.get_text().strip()
-                    if text and len(text) < 30:  # Avoid long descriptions
-                        colors_found.add(text)
-            
-            # If no colors found, try extracting from product name
-            if not colors_found and product_data["name"] != "N/A":
-                color_patterns = [
-                    r'in (\w+)',
-                    r'- (\w+(?:\s+\w+)?)\s*(?:\||$)',
-                    r'\((\w+(?:\s+\w+)?)\)'
-                ]
-                
-                for pattern in color_patterns:
-                    matches = re.findall(pattern, product_data["name"], re.IGNORECASE)
-                    for match in matches:
-                        if not any(word in match.lower() for word in ['stroller', 'car', 'seat', 'system']):
-                            colors_found.add(match.strip())
-            
-            product_data["color_options"] = list(colors_found) if colors_found else ["N/A"]
-            product_data["simplified_colors"] = [self.simplify_color(color) for color in product_data["color_options"]]
+            for selector in price_selectors:
+                price_elem = soup.select_one(selector)
+                if price_elem:
+                    price_text = price_elem.get_text()
+                    price_match = re.search(r'\$(\d+(?:,\d{3})*(?:\.\d{2})?)', price_text)
+                    if price_match:
+                        product_data["price"] = f"${price_match.group(1)}"
+                        break
             
             # Extract specifications (weight, dimensions, rating)
             spec_text = soup.get_text().lower()
@@ -369,7 +573,7 @@ class BabylistStrollerScraper:
         except Exception as e:
             print(f"Error scraping {url}: {e}")
             return None
-    
+        
     def scrape_all_strollers(self):
         """Main scraping method"""
         try:
@@ -405,10 +609,6 @@ class BabylistStrollerScraper:
         except Exception as e:
             print(f"Error in main scraping: {e}")
             return []
-        
-        finally:
-            if self.driver:
-                self.driver.quit()
     
     def save_to_csv(self, products, filename="babylist_single_strollers_complete.csv"):
         """Save products to CSV"""
@@ -426,13 +626,20 @@ class BabylistStrollerScraper:
         df.to_csv(filename, index=False)
         print(f"\nSaved {len(products)} products to {filename}")
         print(f"Columns: {list(df.columns)}")
+    
+    def close(self):
+        """Close the web driver"""
+        if self.driver:
+            self.driver.quit()
 
 # Usage
 if __name__ == "__main__":
     chrome_path = "/Users/makaylacheng/Downloads/chromedriver-mac-arm64/chromedriver"
     
     scraper = BabylistStrollerScraper(chrome_path)
-    products = scraper.scrape_all_strollers()
-    scraper.save_to_csv(products)
-    
-    print(f"\nScraping complete! Found {len(products)} products.")
+    try:
+        products = scraper.scrape_all_strollers()
+        scraper.save_to_csv(products)
+        print(f"\nScraping complete! Found {len(products)} products.")
+    finally:
+        scraper.close()
